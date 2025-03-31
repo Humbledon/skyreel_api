@@ -1,7 +1,7 @@
 import os
 import argparse
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from diffusers import DiffusionPipeline
 from PIL import Image
 import cv2
 import numpy as np
@@ -12,12 +12,14 @@ def setup_model():
     try:
         model_name = "Skywork/SkyReels-V1-Hunyuan-I2V"
         print(f"Chargement du modèle {model_name}...")
-        model = AutoModelForCausalLM.from_pretrained(
+        pipe = DiffusionPipeline.from_pretrained(
             model_name,
             torch_dtype=torch.float16,
-            device_map="auto"
+            use_safetensors=True
         )
-        return model
+        if torch.cuda.is_available():
+            pipe = pipe.to("cuda")
+        return pipe
     except Exception as e:
         print(f"Erreur lors du chargement du modèle : {str(e)}")
         sys.exit(1)
@@ -40,35 +42,33 @@ def process_image(image_path):
         print(f"Erreur lors du traitement de l'image : {str(e)}")
         sys.exit(1)
 
-def generate_video(model, image, output_path, num_frames=16):
+def generate_video(pipe, image, output_path, num_frames=16):
     """Génère une vidéo à partir de l'image"""
     try:
-        # Convertir l'image en tenseur
-        image_tensor = torch.tensor(np.array(image)).permute(2, 0, 1).unsqueeze(0)
-        
         # Générer la vidéo
-        with torch.no_grad():
-            output = model.generate(
-                image_tensor,
-                max_length=num_frames,
-                num_beams=5,
-                temperature=0.7,
-                top_p=0.9
-            )
+        print("Génération de la vidéo...")
+        result = pipe(
+            image,
+            num_inference_steps=50,
+            num_frames=num_frames,
+            guidance_scale=7.5,
+            negative_prompt="blurry, low quality, distorted, deformed"
+        )
         
-        # Convertir la sortie en vidéo
-        frames = output.cpu().numpy()
+        # Récupérer les frames
+        frames = result.frames
         
         # Créer la vidéo avec OpenCV
-        height, width = frames[0].shape[1:3]
+        height, width = frames[0].size
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(output_path, fourcc, 8.0, (width, height))
         
         if not out.isOpened():
             raise Exception("Impossible de créer le fichier vidéo")
         
+        # Convertir les frames PIL en format OpenCV
         for frame in frames:
-            frame = (frame * 255).astype(np.uint8)
+            frame = np.array(frame)
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
             out.write(frame)
         
@@ -90,15 +90,14 @@ def main():
     os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
     
     # Initialiser le modèle
-    model = setup_model()
+    pipe = setup_model()
     
     # Traiter l'image
     print("Traitement de l'image...")
     image = process_image(args.input_path)
     
     # Générer la vidéo
-    print("Génération de la vidéo...")
-    if generate_video(model, image, args.output_path, args.num_frames):
+    if generate_video(pipe, image, args.output_path, args.num_frames):
         print(f"Vidéo générée avec succès : {args.output_path}")
     else:
         print("Échec de la génération de la vidéo")
